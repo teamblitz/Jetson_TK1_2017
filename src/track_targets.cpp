@@ -1,4 +1,6 @@
+#include "cscore.h"
 #include "networktables/NetworkTable.h"
+#include <opencv2/core/core.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/features2d/features2d.hpp>
@@ -13,11 +15,12 @@ using namespace grip;
 using namespace llvm;
 
 // Code conditionals.
-#define USE_CAMERA_INPUT 0
-#define USE_CONTOUR_DETECTION 1     // vs. simple blob detection
-#define VIEW_OUTPUT 1
-#define NON_ROBOT_NETWORK_TABLES 1
-#define MEASURE_PERFORMANCE 1
+#define USE_CAMERA_INPUT            0   // 1
+#define RESTREAM_VIDEO              0   // 1
+#define USE_CONTOUR_DETECTION       1   // 1   vs. 0 ==  simple blob detection
+#define VIEW_OUTPUT                 1   // 0
+#define NON_ROBOT_NETWORK_TABLES    1   // 0
+#define MEASURE_PERFORMANCE         1   // 0
 
 // Performance macros.
 map<string, int64> ticks;
@@ -76,6 +79,14 @@ int main(int argc, char** argv)
 
     auto ttTable = initializeNetworkTables();
 
+#if RESTREAM_VIDEO
+    // Create an MJPEG server for restreaming the USB camera feed
+    // to the roboRIO.
+    cs::CvSource restreamSource("CV Image Source", cs::VideoMode::PixelFormat::kMJPEG, 640, 480, 30);
+    cs::MjpegServer mjpegServer("Image Server", 1186);
+    mjpegServer.SetSource(restreamSource);
+#endif
+
 #if USE_CAMERA_INPUT
     // Open USB camera on port 0.
     VideoCapture input(0);
@@ -109,11 +120,15 @@ int main(int argc, char** argv)
     SimpleBlobDetector::Params params = getSimpleBlobDetectorParams();
     SimpleBlobDetector blobDetector(params);
 
+    // Pre-allocate Mats.
+    Mat rawFrame;
+    Mat frame;
+    Mat detectionFrame;
+
     // Grab and process frames.
     for (;;)
     {
         TICK_ACCUMULATOR_START(read);
-        Mat rawFrame;
         if (!input.read(rawFrame))
             break;
         TICK_ACCUMULATOR_END(read);
@@ -122,7 +137,6 @@ int main(int argc, char** argv)
 #endif
 
         TICK_ACCUMULATOR_START(resize);
-        Mat frame;
         resize(rawFrame, frame, Size(), FRAME_SCALE_FACTOR, FRAME_SCALE_FACTOR, CV_INTER_AREA);
         TICK_ACCUMULATOR_END(resize);
 
@@ -150,6 +164,7 @@ int main(int argc, char** argv)
             auto centerX = (left + right)/2;
             auto centerY = (top + bottom)/2;
 
+            // Compute the center of both targets combined.
             displayCenter.x = centerX;
             displayCenter.y = centerY;
             displayRect.x = left;
@@ -192,10 +207,8 @@ int main(int argc, char** argv)
         TICK_ACCUMULATOR_END(network_tables);  
 #endif
 
-#if VIEW_OUTPUT
-        // In debug mode, render the keypoints onto the frames.
+        // Render the keypoints onto the frames.
         TICK_ACCUMULATOR_START(view);
-        Mat detectionFrame;
         frame.copyTo(detectionFrame);
 
 #if USE_CONTOUR_DETECTION
@@ -215,10 +228,15 @@ int main(int argc, char** argv)
         }
 #endif
 
+#if RESTREAM_VIDEO
+        restreamSource.PutFrame(detectionFrame);
+#endif
+
+#if VIEW_OUTPUT
         imshow("frame", detectionFrame);
         waitKey(1);
-        TICK_ACCUMULATOR_END(view);
 #endif
+        TICK_ACCUMULATOR_END(view);
     }
 
 #if MEASURE_PERFORMANCE
