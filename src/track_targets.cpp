@@ -16,10 +16,10 @@ using namespace llvm;
 
 // Code conditionals.
 #define USE_CAMERA_INPUT            0   // 1
-#define RESTREAM_VIDEO              0   // 1
+#define RESTREAM_VIDEO              1   // 1
 #define USE_CONTOUR_DETECTION       1   // 1   vs. 0 ==  simple blob detection
-#define VIEW_OUTPUT_ON_DISPLAY      1   // 0
-#define NON_ROBOT_NETWORK_TABLES    1   // 0
+#define VIEW_OUTPUT_ON_DISPLAY      0   // 0
+#define NON_ROBOT_NETWORK_TABLES    0   // 0
 #define MEASURE_PERFORMANCE         1   // 0
 
 // Performance macros.
@@ -137,11 +137,6 @@ int main(int argc, char** argv)
     SimpleBlobDetector::Params params = getSimpleBlobDetectorParams();
     SimpleBlobDetector blobDetector(params);
 
-    // Pre-allocate Mats.
-    Mat rawFrame;
-    Mat frame;
-    Mat detectionFrame;
-
     // Analytics.
     double minArea = 1000000;
     double maxArea = 0;
@@ -150,14 +145,16 @@ int main(int argc, char** argv)
     for (;;)
     {
         TICK_ACCUMULATOR_START(read);
+        Mat rawFrame;
         if (!input.read(rawFrame))
-            break;
+            continue;
         TICK_ACCUMULATOR_END(read);
 #if MEASURE_PERFORMANCE
         frameCount++;
 #endif
 
         TICK_ACCUMULATOR_START(resize);
+        Mat frame;
         resize(rawFrame, frame, Size(), FRAME_SCALE_FACTOR, FRAME_SCALE_FACTOR, CV_INTER_AREA);
         TICK_ACCUMULATOR_END(resize);
 
@@ -175,6 +172,8 @@ int main(int argc, char** argv)
         Rect displayRect;
         if (hits.size() > 1)
         {
+            cout << "Hits" << endl;
+
             // Compute a rect that covers both targets.
             vector<double> center(2, 0.0);
             vector<double> rect(4, 0.0);
@@ -223,22 +222,27 @@ int main(int argc, char** argv)
         }
         else
         {
+            cout << "Miss" << endl;
+
             ArrayRef<double> centerArray {0, 0, 0, 0};
             ArrayRef<double> rectArray {0, 0, 0, 0};
             ttTable->PutBoolean("tracking", false);
             ttTable->PutNumberArray("center", centerArray);
             ttTable->PutNumberArray("rect", rectArray);
-            ttTable->PutNumberArray("area", 0);
+            ttTable->PutNumber("area", 0);
         }
         TICK_ACCUMULATOR_END(network_tables);
 
         // Render the keypoints onto the frames.
         TICK_ACCUMULATOR_START(view);
+#if RESTREAM_VIDEO || VIEW_OUTPUT_ON_DISPLAY
+        Mat detectionFrame;
         frame.copyTo(detectionFrame);
         rectangle(detectionFrame, displayRect, Scalar(0, 255, 0), 2);
         circle(detectionFrame, displayCenter, 4, Scalar(0, 255, 0), 2);
         drawContours(detectionFrame, hits, -1, Scalar(0, 0, 255), 2);
         drawContours(detectionFrame, skips, -1, Scalar(0, 0, 0), 2);
+#endif
 
 #if RESTREAM_VIDEO
         restreamSource.PutFrame(detectionFrame);

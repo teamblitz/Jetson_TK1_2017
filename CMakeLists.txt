@@ -10,9 +10,9 @@ include_directories("libs/cscore/include")
 include_directories("libs/ntcore/include")
 include_directories("libs/wpiutil/include")
 
-link_directories("../libs/cscore/Linux/arm")
-link_directories("../libs/ntcore/Linux/arm")
-link_directories("../libs/wpiutil/Linux/arm")
+link_directories("/home/ubuntu/projects/github/teamblitz/Jetson_TK1_2017/libs/cscore/Linux/arm")
+link_directories("/home/ubuntu/projects/github/teamblitz/Jetson_TK1_2017/libs/ntcore/Linux/arm")
+link_directories("/home/ubuntu/projects/github/teamblitz/Jetson_TK1_2017/libs/wpiutil/Linux/arm")
 
 add_definitions(-std=c++11)
 
