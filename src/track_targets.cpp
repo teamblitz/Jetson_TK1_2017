@@ -4,66 +4,79 @@
 #include <opencv2/video/video.hpp>
 #include <iostream>
 
-#define USE_CAMERA_INPUT 0
+using namespace std;
+using namespace cv;
+
+#define USE_CAMERA_INPUT 1
 #define DEBUG_MODE 0
 
 // Forward declarations.
-cv::SimpleBlobDetector::Params getParamsForGRIPFindBlobs();
-cv::SimpleBlobDetector::Params getParamsForNormalVideo();
-cv::SimpleBlobDetector::Params getParamsForThresholdVideo();
+SimpleBlobDetector::Params getParamsForGRIPFindBlobs();
+SimpleBlobDetector::Params getParamsForNormalVideo();
+SimpleBlobDetector::Params getParamsForThresholdVideo();
 
-int main()
+int main(int argc, char** argv)
 {
+	cout << argv[0] << " running..." << endl;
+
 	// Open USB camera on port 0.
 #if USE_CAMERA_INPUT
-    cv::VideoCapture input(0);
+    VideoCapture input(0);
+	if (!input.isOpened())
+	{
+		cerr << "ERROR: Failed to open camera!" << endl;
+		cout << "Make sure that there are no other instances of this program already running!" << endl;
+		return -1;
+	}
 #else
-//	cv::VideoCapture input("../sample_media/videos/WIN_20170307_20_43_09_Pro.mp4");
-    cv::VideoCapture input("../sample_media/videos/WIN_20170307_20_45_18_Pro.mp4");
+//	VideoCapture input("../sample_media/videos/WIN_20170307_20_43_09_Pro.mp4");
+    VideoCapture input("../sample_media/videos/WIN_20170307_20_45_18_Pro.mp4");
 #endif
 
 	// Grab and process frames.
 	for (;;)
 	{
-		cv::Mat frame;
+		Mat frame;
 		if (!input.read(frame))
 			break;
 
-		cv::Mat blurredFrame;
-		cv::medianBlur(frame, blurredFrame, 11);
+		Mat blurredFrame;
+		medianBlur(frame, blurredFrame, 11);
 	
-		cv::Mat thresholdFrame;
-		cv::threshold(blurredFrame, thresholdFrame, 220, 255, CV_THRESH_BINARY);
+		Mat thresholdFrame;
+		threshold(blurredFrame, thresholdFrame, 220, 255, CV_THRESH_BINARY);
 
-		std::vector<cv::KeyPoint> keypoints;
+		vector<KeyPoint> keypoints;
 
-		cv::SimpleBlobDetector::Params params = getParamsForGRIPFindBlobs();
+		SimpleBlobDetector::Params params = getParamsForGRIPFindBlobs();
 		
-		cv::SimpleBlobDetector detector(params);
+		SimpleBlobDetector detector(params);
 		detector.detect(thresholdFrame, keypoints); 
 
 		// Test code to display points on frame.
-		std::vector<cv::Point2f> points;
-		cv::KeyPoint::convert(keypoints, points);
+		vector<Point2f> points;
+		KeyPoint::convert(keypoints, points);
 
-		cv::Mat detectionFrame;
+		Mat detectionFrame;
 		frame.copyTo(detectionFrame);
-		//std::cout << "Keypoints " << keypoints.size() << "\n";
+		//cout << "Keypoints " << keypoints.size() << endl;
 		for (size_t i = 0; i < keypoints.size(); i++)
 		{
-			cv::circle(detectionFrame, keypoints[i].pt, keypoints[i].size/2, 128, 3);
+			circle(detectionFrame, keypoints[i].pt, keypoints[i].size/2, 128, 3);
 		}
 
 #if DEBUG_MODE
-		cv::imshow("frame", detectionFrame);
-		cv::waitKey(1);
+		imshow("frame", detectionFrame);
+		waitKey(1);
 #endif
 	}
+
+	cout << argv[0] << " finished!" << endl;
 }
 
-cv::SimpleBlobDetector::Params getParamsForGRIPFindBlobs()
+SimpleBlobDetector::Params getParamsForGRIPFindBlobs()
 {
-    cv::SimpleBlobDetector::Params params = cv::SimpleBlobDetector::Params();
+    SimpleBlobDetector::Params params = SimpleBlobDetector::Params();
     params.thresholdStep = 10;				// 10
     params.minThreshold = 50;				// 50
     params.maxThreshold = 220;				// 220
@@ -87,9 +100,9 @@ cv::SimpleBlobDetector::Params getParamsForGRIPFindBlobs()
     return params;
 }
 
-cv::SimpleBlobDetector::Params getParamsForNormalVideo()
+SimpleBlobDetector::Params getParamsForNormalVideo()
 {
-	cv::SimpleBlobDetector::Params params = cv::SimpleBlobDetector::Params();
+	SimpleBlobDetector::Params params = SimpleBlobDetector::Params();
     params.thresholdStep = 2;
     params.minThreshold = 180;
     params.maxThreshold = 255;
@@ -108,9 +121,9 @@ cv::SimpleBlobDetector::Params getParamsForNormalVideo()
 	return params;
 }
 
-cv::SimpleBlobDetector::Params getParamsForThresholdVideo()
+SimpleBlobDetector::Params getParamsForThresholdVideo()
 {
-    cv::SimpleBlobDetector::Params params = cv::SimpleBlobDetector::Params();
+    SimpleBlobDetector::Params params = SimpleBlobDetector::Params();
     params.thresholdStep = 127;
     params.minThreshold = 0;
     params.maxThreshold = 255;
