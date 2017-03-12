@@ -7,10 +7,11 @@
 using namespace std;
 using namespace cv;
 
-#define USE_CAMERA_INPUT 1
-#define DEBUG_MODE 0
+#define USE_CAMERA_INPUT 0
+#define DEBUG_MODE 1
 
 // Forward declarations.
+vector<KeyPoint> filterKeyPoints(vector<KeyPoint> keypoints);
 SimpleBlobDetector::Params getParamsForGRIPFindBlobs();
 SimpleBlobDetector::Params getParamsForNormalVideo();
 SimpleBlobDetector::Params getParamsForThresholdVideo();
@@ -46,17 +47,16 @@ int main(int argc, char** argv)
 		Mat thresholdFrame;
 		threshold(blurredFrame, thresholdFrame, 220, 255, CV_THRESH_BINARY);
 
-		vector<KeyPoint> keypoints;
-
 		SimpleBlobDetector::Params params = getParamsForGRIPFindBlobs();
-		
 		SimpleBlobDetector detector(params);
+
+		vector<KeyPoint> keypoints;
 		detector.detect(thresholdFrame, keypoints); 
 
-		// Test code to display points on frame.
-		vector<Point2f> points;
-		KeyPoint::convert(keypoints, points);
+		keypoints = filterKeyPoints(keypoints);
 
+#if DEBUG_MODE
+		// In debug mode, render the keypoints onto the frames.
 		Mat detectionFrame;
 		frame.copyTo(detectionFrame);
 		//cout << "Keypoints " << keypoints.size() << endl;
@@ -65,13 +65,41 @@ int main(int argc, char** argv)
 			circle(detectionFrame, keypoints[i].pt, keypoints[i].size/2, 128, 3);
 		}
 
-#if DEBUG_MODE
 		imshow("frame", detectionFrame);
 		waitKey(1);
 #endif
 	}
 
 	cout << argv[0] << " finished!" << endl;
+}
+
+vector<KeyPoint> filterKeyPoints(vector<KeyPoint> keypoints)
+{
+	vector<KeyPoint> newKeypoints;
+
+	if (keypoints.size() <= 1)
+	{
+		return newKeypoints;
+	}
+
+	sort(keypoints.begin(), keypoints.end(), 
+		[] (KeyPoint const& a, KeyPoint const& b) { return a.size > b.size; });
+
+	for (auto iter = keypoints.begin(); iter != keypoints.end()-1; ++iter)
+	{
+		for (auto other = iter+1; other != keypoints.end(); ++other)
+		{
+			if ((abs((*iter).pt.x - (*other).pt.x) < 7 * (*iter).size) &&
+				(abs((*iter).pt.y - (*other).pt.y) < 3 * (*iter).size))
+			{
+				newKeypoints.push_back(*iter);
+				newKeypoints.push_back(*other);
+				return newKeypoints;
+			}
+		}	
+	}
+
+	return newKeypoints;
 }
 
 SimpleBlobDetector::Params getParamsForGRIPFindBlobs()
