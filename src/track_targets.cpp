@@ -20,8 +20,8 @@ int main(int argc, char** argv)
 {
 	cout << argv[0] << " running..." << endl;
 
-	// Open USB camera on port 0.
 #if USE_CAMERA_INPUT
+    // Open USB camera on port 0.
     VideoCapture input(0);
 	if (!input.isOpened())
 	{
@@ -30,8 +30,20 @@ int main(int argc, char** argv)
 		return -1;
 	}
 #else
+	// Open a test video file.
 //	VideoCapture input("../sample_media/videos/WIN_20170307_20_43_09_Pro.mp4");
     VideoCapture input("../sample_media/videos/WIN_20170307_20_45_18_Pro.mp4");
+	if (!input.isOpened())
+	{
+		cout << "Could not open test video file. Reverting to live camera feed." << endl;
+		input.open(0);
+		if (!input.isOpened())
+		{
+        	cerr << "ERROR: Failed to open camera!" << endl;
+        	cout << "Make sure that there are no other instances of this program already running!" << endl;
+        	return -1;
+		}
+	}
 #endif
 
 	// Grab and process frames.
@@ -70,6 +82,8 @@ int main(int argc, char** argv)
 #endif
 	}
 
+	// Clean up and shutdown.
+	input.release();
 	cout << argv[0] << " finished!" << endl;
 }
 
@@ -89,8 +103,11 @@ vector<KeyPoint> filterKeyPoints(vector<KeyPoint> keypoints)
 	{
 		for (auto other = iter+1; other != keypoints.end(); ++other)
 		{
-			if ((abs((*iter).pt.x - (*other).pt.x) < 7 * (*iter).size) &&
-				(abs((*iter).pt.y - (*other).pt.y) < 3 * (*iter).size))
+			auto avgTargetSize = ((*iter).size + (*other).size)/2;
+			auto deltaX = abs((*iter).pt.x - (*other).pt.x);
+			auto deltaY =  abs((*iter).pt.y - (*other).pt.y);
+			if ((deltaX < 7 * avgTargetSize) && (deltaX > 2 * avgTargetSize) &&
+				(deltaY < 3 * avgTargetSize))
 			{
 				newKeypoints.push_back(*iter);
 				newKeypoints.push_back(*other);
