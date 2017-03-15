@@ -84,7 +84,9 @@ int main(int argc, char** argv)
         if (!input.read(rawFrame))
             break;
         TICK_ACCUMULATOR_END(read);
+#if MEASURE_PERFORMANCE
         frameCount++;
+#endif
 
         TICK_ACCUMULATOR_START(resize);
         Mat frame;
