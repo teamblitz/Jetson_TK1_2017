@@ -7,11 +7,25 @@
 using namespace std;
 using namespace cv;
 
+// Code conditionals.
 #define USE_CAMERA_INPUT 0
-#define DEBUG_MODE 1
+#define VIEW_OUTPUT 1
+#define MEASURE_PERFORMANCE 1
+
+// Performance macros.
+#if MEASURE_PERFORMANCE
+#define TICK_ACCUMULATOR_START(NAME)	auto NAME ## Start = getTickCount()
+#define TICK_ACCUMULATOR_END(NAME)		NAME ## Ticks += (getTickCount() - NAME ## Start)
+#else
+#define TICK_ACCUMULATOR_START(NAME)
+#define TICK_ACCUMULATOR_END(NAME)
+#endif
+
+// Constants.
+static const float FRAME_SCALE_FACTOR = 0.5;
 
 // Forward declarations.
-vector<KeyPoint> filterKeyPoints(vector<KeyPoint> keypoints);
+void filterKeyPoints(vector<KeyPoint> const keypoints, vector<KeyPoint>& hits, vector<KeyPoint>& skips);
 SimpleBlobDetector::Params getParamsForGRIPFindBlobs();
 SimpleBlobDetector::Params getParamsForNormalVideo();
 SimpleBlobDetector::Params getParamsForThresholdVideo();
@@ -46,81 +60,165 @@ int main(int argc, char** argv)
 	}
 #endif
 
+    SimpleBlobDetector::Params params = getParamsForGRIPFindBlobs();
+    SimpleBlobDetector detector(params);
+
+#if MEASURE_PERFORMANCE
+	auto start = getTickCount();
+	int64 readTicks = 0;
+	int64 resizeTicks = 0;
+	int64 blurTicks = 0;
+	int64 thresholdTicks = 0;
+	int64 detectTicks = 0;
+	int64 sortTicks = 0;
+	int64 filterTicks = 0;
+	int64 viewTicks = 0;
+	int64 frameCount = 0;
+#endif
+
 	// Grab and process frames.
 	for (;;)
 	{
-		Mat frame;
-		if (!input.read(frame))
+		TICK_ACCUMULATOR_START(read);
+		Mat rawFrame;
+		if (!input.read(rawFrame))
 			break;
+		TICK_ACCUMULATOR_END(read);
+		frameCount++;
 
-		Mat blurredFrame;
-		medianBlur(frame, blurredFrame, 11);
+		TICK_ACCUMULATOR_START(resize);
+		Mat frame;
+		resize(rawFrame, frame, Size(), FRAME_SCALE_FACTOR, FRAME_SCALE_FACTOR, CV_INTER_AREA);
+		TICK_ACCUMULATOR_END(resize);
+
+		TICK_ACCUMULATOR_START(blur);
+		//Mat blurredFrame;
+		//medianBlur(frame, blurredFrame, 11);
+		TICK_ACCUMULATOR_END(blur);
 	
-		Mat thresholdFrame;
-		threshold(blurredFrame, thresholdFrame, 220, 255, CV_THRESH_BINARY);
+		TICK_ACCUMULATOR_START(threshold);
+		//Mat thresholdFrame;
+		//threshold(frame, thresholdFrame, 200, 255, CV_THRESH_BINARY);
+		TICK_ACCUMULATOR_END(threshold);
 
-		SimpleBlobDetector::Params params = getParamsForGRIPFindBlobs();
-		SimpleBlobDetector detector(params);
+		TICK_ACCUMULATOR_START(detect);
+		vector<KeyPoint> keyPoints;
+		detector.detect(frame, keyPoints); 
+		TICK_ACCUMULATOR_END(detect);
 
-		vector<KeyPoint> keypoints;
-		detector.detect(thresholdFrame, keypoints); 
+		TICK_ACCUMULATOR_START(sort);
+		sort(keyPoints.begin(), keyPoints.end(),
+        	 [] (KeyPoint const& a, KeyPoint const& b) { return a.size > b.size; });
+		TICK_ACCUMULATOR_END(sort);
 
-		keypoints = filterKeyPoints(keypoints);
+		TICK_ACCUMULATOR_START(filter);
+		vector<KeyPoint> hits, misses;
+		filterKeyPoints(keyPoints, hits, misses);
+		TICK_ACCUMULATOR_END(filter);
 
-#if DEBUG_MODE
+#if VIEW_OUTPUT
 		// In debug mode, render the keypoints onto the frames.
+		TICK_ACCUMULATOR_START(view);
 		Mat detectionFrame;
 		frame.copyTo(detectionFrame);
 		//cout << "Keypoints " << keypoints.size() << endl;
-		for (size_t i = 0; i < keypoints.size(); i++)
+		for (size_t i = 0; i < hits.size(); i++)
 		{
-			circle(detectionFrame, keypoints[i].pt, keypoints[i].size/2, 128, 3);
+			circle(detectionFrame, hits[i].pt, hits[i].size/2, Scalar(0, 0, 255), 3);
+		}
+
+		for (size_t i = 0; i < misses.size(); i++)
+		{
+			circle(detectionFrame, misses[i].pt, misses[i].size/2, Scalar(0, 0, 0), 3);
 		}
 
 		imshow("frame", detectionFrame);
 		waitKey(1);
+		TICK_ACCUMULATOR_END(view);
 #endif
 	}
+
+#if MEASURE_PERFORMANCE
+	auto final = getTickCount();
+	auto const tickFreq = getTickFrequency();
+	auto totalTime = (final - start)/getTickFrequency();	// seconds
+	auto other = final - start;
+	cout << "Execution took " << totalTime << " seconds" << endl;
+	cout << "  Read: " << readTicks/tickFreq << " seconds" << endl;
+	other -= readTicks;
+	cout << "  Resize: " << resizeTicks/tickFreq << " seconds" << endl;
+	other -= resizeTicks;
+	cout << "  Blur: " << blurTicks/tickFreq << " seconds" << endl;
+	other -= blurTicks;
+	cout << "  Threshold: " << thresholdTicks/tickFreq << " seconds" << endl;
+	other -= thresholdTicks;
+	cout << "  Sort: " << sortTicks/tickFreq << " seconds" << endl;
+	other -= sortTicks;
+	cout << "  Detect: " << detectTicks/tickFreq << " seconds" << endl;
+	other -= detectTicks;
+	cout << "  Filter: " << filterTicks/tickFreq << " seconds" << endl;
+	other -= filterTicks;
+#if VIEW_MOD
+	cout << "  View: " << viewTicks/tickFreq << " seconds" << endl;
+	other -= viewTicks;
+#endif
+	cout << "  Other: " << other/tickFreq << " seconds" << endl;
+	cout << "Frames processed: " << frameCount << endl;
+	cout << "Frame rate: " << frameCount/totalTime << " frames/second" << endl;
+#endif
 
 	// Clean up and shutdown.
 	input.release();
 	cout << argv[0] << " finished!" << endl;
 }
 
-vector<KeyPoint> filterKeyPoints(vector<KeyPoint> keypoints)
+/**
+ * Filter the keypoints looking for potential keypoints that
+ * correspond to the two matching targets. Once found, the
+ * target keypoints will be returns in the "hits" vector.i
+ * Any keypoints skipped up until that point (because they
+ * are not viable target candidates) will be returned in the
+ * "skips" vector.
+ */
+void filterKeyPoints(vector<KeyPoint> const keyPoints, vector<KeyPoint>& hits, vector<KeyPoint>& skips)
 {
-	vector<KeyPoint> newKeypoints;
-
-	if (keypoints.size() <= 1)
+	if (keyPoints.size() == 0)
 	{
-		return newKeypoints;
+		return;
 	}
 
-	sort(keypoints.begin(), keypoints.end(), 
-		[] (KeyPoint const& a, KeyPoint const& b) { return a.size > b.size; });
-
-	for (auto iter = keypoints.begin(); iter != keypoints.end()-1; ++iter)
+	if (keyPoints.size() == 1)
 	{
-		for (auto other = iter+1; other != keypoints.end(); ++other)
+		skips.push_back(*(keyPoints.begin()));
+		return;
+	}
+
+	for (auto iter = keyPoints.begin(); iter != keyPoints.end()-1; iter++)
+	{
+		for (auto other = iter+1; other != keyPoints.end(); other++)
 		{
 			auto avgTargetSize = ((*iter).size + (*other).size)/2;
 			auto deltaX = abs((*iter).pt.x - (*other).pt.x);
 			auto deltaY =  abs((*iter).pt.y - (*other).pt.y);
-			if ((deltaX < 7 * avgTargetSize) && (deltaX > 2 * avgTargetSize) &&
+			if ((deltaX < 9 * avgTargetSize) && (deltaX > 2 * avgTargetSize) &&
 				(deltaY < 3 * avgTargetSize))
 			{
-				newKeypoints.push_back(*iter);
-				newKeypoints.push_back(*other);
-				return newKeypoints;
+				hits.push_back(*iter);
+				hits.push_back(*other);
+				return;
+			}
+			else
+			{
+				skips.push_back(*iter);
 			}
 		}	
 	}
-
-	return newKeypoints;
 }
 
 SimpleBlobDetector::Params getParamsForGRIPFindBlobs()
 {
+	const float fsfs = FRAME_SCALE_FACTOR * FRAME_SCALE_FACTOR;
+
     SimpleBlobDetector::Params params = SimpleBlobDetector::Params();
     params.thresholdStep = 10;				// 10
     params.minThreshold = 50;				// 50
@@ -130,8 +228,8 @@ SimpleBlobDetector::Params getParamsForGRIPFindBlobs()
     params.filterByColor = true;			// true
     params.blobColor = 255;					// 255
     params.filterByArea = true;				// true
-    params.minArea = 1000;					// 1000
-	params.maxArea = 20000;					// INT_MAX
+    params.minArea = 1000 * fsfs;			// 1000
+	params.maxArea = 20000 * fsfs;			// INT_MAX
     params.filterByCircularity = true;		// true
 	params.minCircularity = 0;				// 0
 	params.maxCircularity = 1;				// 1
