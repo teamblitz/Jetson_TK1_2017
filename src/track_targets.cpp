@@ -1,3 +1,4 @@
+#include "networktables/NetworkTable.h"
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/features2d/features2d.hpp>
@@ -6,10 +7,12 @@
 
 using namespace std;
 using namespace cv;
+using namespace llvm;
 
 // Code conditionals.
 #define USE_CAMERA_INPUT 0
 #define VIEW_OUTPUT 1
+#define NON_ROBOT_NETWORK_TABLES 1
 #define MEASURE_PERFORMANCE 1
 
 // Performance macros.
@@ -25,6 +28,7 @@ using namespace cv;
 static const float FRAME_SCALE_FACTOR = 0.5;
 
 // Forward declarations.
+shared_ptr<NetworkTable> initializeNetworkTables();
 void filterKeyPoints(vector<KeyPoint> const keypoints, vector<KeyPoint>& hits, vector<KeyPoint>& skips);
 SimpleBlobDetector::Params getParamsForGRIPFindBlobs();
 SimpleBlobDetector::Params getParamsForNormalVideo();
@@ -33,6 +37,8 @@ SimpleBlobDetector::Params getParamsForThresholdVideo();
 int main(int argc, char** argv)
 {
     cout << argv[0] << " running..." << endl;
+
+    auto ttTable = initializeNetworkTables();
 
 #if USE_CAMERA_INPUT
     // Open USB camera on port 0.
@@ -118,6 +124,16 @@ int main(int argc, char** argv)
         filterKeyPoints(keyPoints, hits, misses);
         TICK_ACCUMULATOR_END(filter);
 
+        // Send target info to network tables.
+        MutableArrayRef<double> targets;
+        targets[0] = hits[0].pt.x;
+        targets[1] = hits[0].pt.y;
+        targets[2] = hits[0].size/2;
+        targets[3] = hits[1].pt.x;
+        targets[4] = hits[1].pt.y;
+        targets[5] = hits[2].size/2;
+        ttTable->PutNumberArray("targets", targets);
+  
 #if VIEW_OUTPUT
         // In debug mode, render the keypoints onto the frames.
         TICK_ACCUMULATOR_START(view);
@@ -172,6 +188,21 @@ int main(int argc, char** argv)
     // Clean up and shutdown.
     input.release();
     cout << argv[0] << " finished!" << endl;
+}
+
+shared_ptr<NetworkTable> initializeNetworkTables()
+{
+   // Connect NetworkTables and get access to the tracking table.
+   NetworkTable::SetClientMode();
+    NetworkTable::SetTeam(2083);
+    
+#if NON_ROBOT_NETWORK_TABLES
+    NetworkTable::SetIPAddress("169.254.148.140");
+#endif
+
+    NetworkTable::Initialize();
+
+    return NetworkTable::GetTable("target_tracking_table");
 }
 
 /**
