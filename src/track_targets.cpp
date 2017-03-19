@@ -52,7 +52,11 @@ int main(int argc, char** argv)
 #else
     // Open a test video file.
 //  VideoCapture input("../sample_media/videos/WIN_20170307_20_43_09_Pro.mp4");
-    VideoCapture input("../sample_media/videos/WIN_20170307_20_45_18_Pro.mp4");
+//    VideoCapture input("../sample_media/videos/WIN_20170307_20_45_18_Pro.mp4");
+//    VideoCapture input("../sample_media/videos/WIN_20170314_19_22_47_Pro.mp4");
+//    VideoCapture input("../sample_media/videos/WIN_20170314_19_24_21_Pro.mp4");
+    VideoCapture input("../sample_media/videos/WIN_20170314_19_25_35_Pro.mp4");
+
     if (!input.isOpened())
     {
         cout << "Could not open test video file. Reverting to live camera feed." << endl;
@@ -125,14 +129,18 @@ int main(int argc, char** argv)
         TICK_ACCUMULATOR_END(filter);
 
         // Send target info to network tables.
-        MutableArrayRef<double> targets;
-        targets[0] = hits[0].pt.x;
-        targets[1] = hits[0].pt.y;
-        targets[2] = hits[0].size/2;
-        targets[3] = hits[1].pt.x;
-        targets[4] = hits[1].pt.y;
-        targets[5] = hits[2].size/2;
-        ttTable->PutNumberArray("targets", targets);
+        vector<double> targets(6, 0.0); 
+        if (hits.size() > 1)
+        {
+            targets[0] = hits[0].pt.x;
+            targets[1] = hits[0].pt.y;
+            targets[2] = hits[0].size/2;
+            targets[3] = hits[1].pt.x;
+            targets[4] = hits[1].pt.y;
+            targets[5] = hits[1].size/2;
+        }
+        ArrayRef<double> array(targets);
+        ttTable->PutNumberArray("targets", array);
   
 #if VIEW_OUTPUT
         // In debug mode, render the keypoints onto the frames.
