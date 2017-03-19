@@ -205,6 +205,9 @@ shared_ptr<NetworkTable> initializeNetworkTables()
     NetworkTable::SetTeam(2083);
     
 #if NON_ROBOT_NETWORK_TABLES
+    // Change this address to the dynamically-generated
+    // TCP/IP address of the computer (not roboRIO) that
+    // is running a NetworkTables intance in server mode.
     NetworkTable::SetIPAddress("169.254.148.140");
 #endif
 
