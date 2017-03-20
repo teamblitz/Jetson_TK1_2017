@@ -16,7 +16,9 @@ link_directories("../libs/wpiutil/Linux/arm")
 
 add_definitions(-std=c++11)
 
-add_executable(cv_track_targets src/track_targets.cpp)
+aux_source_directory(src CV_SOURCES)
+
+add_executable(cv_track_targets ${CV_SOURCES})
 
 target_link_libraries(cv_track_targets ${OpenCV_LIBS} cscore ntcore wpiutil)
     

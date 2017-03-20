@@ -5,20 +5,25 @@
 #include <opencv2/video/video.hpp>
 #include <iostream>
 
+#include "GripPipeline.h"
+
 using namespace std;
 using namespace cv;
+using namespace grip;
 using namespace llvm;
 
 // Code conditionals.
 #define USE_CAMERA_INPUT 0
+#define USE_CONTOUR_DETECTION 1     // vs. simple blob detection
 #define VIEW_OUTPUT 1
 #define NON_ROBOT_NETWORK_TABLES 1
 #define MEASURE_PERFORMANCE 1
 
 // Performance macros.
+map<string, int64> ticks;
 #if MEASURE_PERFORMANCE
 #define TICK_ACCUMULATOR_START(NAME)    auto NAME ## Start = getTickCount()
-#define TICK_ACCUMULATOR_END(NAME)      NAME ## Ticks += (getTickCount() - NAME ## Start)
+#define TICK_ACCUMULATOR_END(NAME)	    ticks[#NAME] += (getTickCount() - NAME ## Start)
 #else
 #define TICK_ACCUMULATOR_START(NAME)
 #define TICK_ACCUMULATOR_END(NAME)
@@ -29,14 +34,45 @@ static const float FRAME_SCALE_FACTOR = 0.5;
 
 // Forward declarations.
 shared_ptr<NetworkTable> initializeNetworkTables();
-void filterKeyPoints(vector<KeyPoint> const keypoints, vector<KeyPoint>& hits, vector<KeyPoint>& skips);
-SimpleBlobDetector::Params getParamsForGRIPFindBlobs();
-SimpleBlobDetector::Params getParamsForNormalVideo();
-SimpleBlobDetector::Params getParamsForThresholdVideo();
+
+void runContourDetectionPipeline(Mat const& frame,
+                                 vector<vector<Point>>& hits,
+                                 vector<Rect>& hitRects,
+                                 vector<vector<Point>>& skips);
+void runBlobDetectionPipeline(SimpleBlobDetector const& detector,
+                              Mat const& frame,
+                              vector<KeyPoint>& hits,
+                              vector<KeyPoint>& skips);
+
+void filterKeyPoints(vector<KeyPoint> const& keypoints,
+                     vector<KeyPoint>& hits,
+                     vector<KeyPoint>& skips);
+void filterContours(vector<vector<Point>> const& contours,
+                    vector<vector<Point>>& hits,
+                    vector<Rect>& hitRects,
+                    vector<vector<Point>>& skips);
+
+SimpleBlobDetector::Params getSimpleBlobDetectorParams();
+void hslThreshold(Mat const& input, double hue[], double sat[], double lum[], Mat& out);
+void cvDilate(Mat const& src, Mat &kernel, Point &anchor, double iterations, int borderType, Scalar &borderValue, Mat& dst);
+void findContours(Mat const& input, bool externalOnly, vector<vector<Point>>& contours);
+void filterContours(vector<vector<Point>> const& inputContours,
+                    double minArea,
+                    double minPerimeter,
+                    double minWidth, double maxWidth,
+                    double minHeight, double maxHeight,
+                    double solidity[],
+                    double maxVertexCount, double minVertexCount,
+                    double minRatio, double maxRatio,
+                    vector<vector<Point>>& output);
 
 int main(int argc, char** argv)
 {
     cout << argv[0] << " running..." << endl;
+#if MEASURE_PERFORMANCE
+    auto startTicks = getTickCount();
+    int64 frameCount = 0;
+#endif
 
     auto ttTable = initializeNetworkTables();
 
@@ -51,11 +87,11 @@ int main(int argc, char** argv)
     }
 #else
     // Open a test video file.
-//  VideoCapture input("../sample_media/videos/WIN_20170307_20_43_09_Pro.mp4");
-//    VideoCapture input("../sample_media/videos/WIN_20170307_20_45_18_Pro.mp4");
+//    VideoCapture input("../sample_media/videos/WIN_20170307_20_43_09_Pro.mp4");
+    VideoCapture input("../sample_media/videos/WIN_20170307_20_45_18_Pro.mp4");
 //    VideoCapture input("../sample_media/videos/WIN_20170314_19_22_47_Pro.mp4");
 //    VideoCapture input("../sample_media/videos/WIN_20170314_19_24_21_Pro.mp4");
-    VideoCapture input("../sample_media/videos/WIN_20170314_19_25_35_Pro.mp4");
+//    VideoCapture input("../sample_media/videos/WIN_20170314_19_25_35_Pro.mp4");
 
     if (!input.isOpened())
     {
@@ -70,21 +106,8 @@ int main(int argc, char** argv)
     }
 #endif
 
-    SimpleBlobDetector::Params params = getParamsForGRIPFindBlobs();
-    SimpleBlobDetector detector(params);
-
-#if MEASURE_PERFORMANCE
-    auto start = getTickCount();
-    int64 readTicks = 0;
-    int64 resizeTicks = 0;
-    int64 blurTicks = 0;
-    int64 thresholdTicks = 0;
-    int64 detectTicks = 0;
-    int64 sortTicks = 0;
-    int64 filterTicks = 0;
-    int64 viewTicks = 0;
-    int64 frameCount = 0;
-#endif
+    SimpleBlobDetector::Params params = getSimpleBlobDetectorParams();
+    SimpleBlobDetector blobDetector(params);
 
     // Grab and process frames.
     for (;;)
@@ -103,31 +126,56 @@ int main(int argc, char** argv)
         resize(rawFrame, frame, Size(), FRAME_SCALE_FACTOR, FRAME_SCALE_FACTOR, CV_INTER_AREA);
         TICK_ACCUMULATOR_END(resize);
 
-        TICK_ACCUMULATOR_START(blur);
-        //Mat blurredFrame;
-        //medianBlur(frame, blurredFrame, 11);
-        TICK_ACCUMULATOR_END(blur);
-    
-        TICK_ACCUMULATOR_START(threshold);
-        //Mat thresholdFrame;
-        //threshold(frame, thresholdFrame, 200, 255, CV_THRESH_BINARY);
-        TICK_ACCUMULATOR_END(threshold);
+#if USE_CONTOUR_DETECTION
+        vector<vector<Point>> hits, skips;
+        vector<Rect> hitRects;
+        runContourDetectionPipeline(frame, hits, hitRects, skips);
 
-        TICK_ACCUMULATOR_START(detect);
-        vector<KeyPoint> keyPoints;
-        detector.detect(frame, keyPoints); 
-        TICK_ACCUMULATOR_END(detect);
+        TICK_ACCUMULATOR_START(network_tables);
+        Point displayCenter;
+        Rect displayRect;
+        if (hits.size() > 1)
+        {
+            // Compute a rect that covers both targets.
+            vector<double> center(2, 0.0);
+            vector<double> rect(4, 0.0);
+            auto left = min(hitRects[0].x, hitRects[1].x);
+            auto top = min(hitRects[0].y, hitRects[1].y);
+            auto right0 = hitRects[0].x + hitRects[0].width;
+            auto right1 = hitRects[1].x + hitRects[0].width;
+            auto right = max(right0, right1);
+            auto bottom0 = hitRects[0].y + hitRects[0].height;
+            auto bottom1 = hitRects[1].y + hitRects[0].height;
+            auto bottom = max(bottom0, bottom1);
+            auto centerX = (left + right)/2;
+            auto centerY = (top + bottom)/2;
 
-        TICK_ACCUMULATOR_START(sort);
-        sort(keyPoints.begin(), keyPoints.end(),
-             [] (KeyPoint const& a, KeyPoint const& b) { return a.size > b.size; });
-        TICK_ACCUMULATOR_END(sort);
+            displayCenter.x = centerX;
+            displayCenter.y = centerY;
+            displayRect.x = left;
+            displayRect.y = top;
+            displayRect.width = abs(right - left);
+            displayRect.height = abs(bottom - top);       
 
-        TICK_ACCUMULATOR_START(filter);
-        vector<KeyPoint> hits, misses;
-        filterKeyPoints(keyPoints, hits, misses);
-        TICK_ACCUMULATOR_END(filter);
+            // Send target info to network tables.
+            center[0] = centerX;
+            center[1] = centerY;
+            rect[0] = left;                    // top, left, bottom, right
+            rect[1] = top;
+            rect[2] = bottom;
+            rect[3] = right;
+            
+            ArrayRef<double> centerArray(center);
+            ArrayRef<double> rectArray(rect);
+            ttTable->PutNumberArray("centers", centerArray);
+            ttTable->PutNumberArray("rects", rectArray);
+        }
+        TICK_ACCUMULATOR_END(network_tables);  
+#else
+        vector<KeyPoint> hits, skips;
+        runBlobDetectionPipeline(blobDetector, frame, hits, skips);
 
+        TICK_ACCUMULATOR_START(network_tables);
         // Send target info to network tables.
         vector<double> targets(6, 0.0); 
         if (hits.size() > 1)
@@ -140,23 +188,32 @@ int main(int argc, char** argv)
             targets[5] = hits[1].size/2;
         }
         ArrayRef<double> array(targets);
-        ttTable->PutNumberArray("targets", array);
-  
+        ttTable->PutNumberArray("blob_keypoints", array);
+        TICK_ACCUMULATOR_END(network_tables);  
+#endif
+
 #if VIEW_OUTPUT
         // In debug mode, render the keypoints onto the frames.
         TICK_ACCUMULATOR_START(view);
         Mat detectionFrame;
         frame.copyTo(detectionFrame);
-        //cout << "Keypoints " << keypoints.size() << endl;
+
+#if USE_CONTOUR_DETECTION
+        rectangle(detectionFrame, displayRect, Scalar(255, 255, 0), 1);
+        circle(detectionFrame, displayCenter, 2, Scalar(255, 255, 255), 1);
+        drawContours(detectionFrame, hits, -1, Scalar(0, 0, 255), 3);
+        drawContours(detectionFrame, skips, -1, Scalar(0, 0, 0), 3);
+#else
         for (size_t i = 0; i < hits.size(); i++)
         {
             circle(detectionFrame, hits[i].pt, hits[i].size/2, Scalar(0, 0, 255), 3);
         }
 
-        for (size_t i = 0; i < misses.size(); i++)
+        for (size_t i = 0; i < skips.size(); i++)
         {
-            circle(detectionFrame, misses[i].pt, misses[i].size/2, Scalar(0, 0, 0), 3);
+            circle(detectionFrame, skips[i].pt, skips[i].size/2, Scalar(0, 0, 0), 3);
         }
+#endif
 
         imshow("frame", detectionFrame);
         waitKey(1);
@@ -165,30 +222,18 @@ int main(int argc, char** argv)
     }
 
 #if MEASURE_PERFORMANCE
-    auto final = getTickCount();
-    auto const tickFreq = getTickFrequency();
-    auto totalTime = (final - start)/getTickFrequency();    // seconds
-    auto other = final - start;
-    cout << "Execution took " << totalTime << " seconds" << endl;
-    cout << "  Read: " << readTicks/tickFreq << " seconds" << endl;
-    other -= readTicks;
-    cout << "  Resize: " << resizeTicks/tickFreq << " seconds" << endl;
-    other -= resizeTicks;
-    cout << "  Blur: " << blurTicks/tickFreq << " seconds" << endl;
-    other -= blurTicks;
-    cout << "  Threshold: " << thresholdTicks/tickFreq << " seconds" << endl;
-    other -= thresholdTicks;
-    cout << "  Sort: " << sortTicks/tickFreq << " seconds" << endl;
-    other -= sortTicks;
-    cout << "  Detect: " << detectTicks/tickFreq << " seconds" << endl;
-    other -= detectTicks;
-    cout << "  Filter: " << filterTicks/tickFreq << " seconds" << endl;
-    other -= filterTicks;
-#if VIEW_MOD
-    cout << "  View: " << viewTicks/tickFreq << " seconds" << endl;
-    other -= viewTicks;
-#endif
-    cout << "  Other: " << other/tickFreq << " seconds" << endl;
+    const auto finalTicks = getTickCount();
+    const auto tickFreq = getTickFrequency();
+    const auto totalTicks = finalTicks - startTicks;
+    const auto totalTime = totalTicks/getTickFrequency();    // seconds
+    auto other = totalTicks;
+    cout << "Execution total time: " << totalTime << " seconds" << endl;
+    for (auto const& entry : ticks)
+    {
+        cout << "  " << entry.first << ": " << entry.second/tickFreq << " seconds" << endl;
+        other -= entry.second;
+    }
+    cout << "  other: " << other/tickFreq << " seconds" << endl;
     cout << "Frames processed: " << frameCount << endl;
     cout << "Frame rate: " << frameCount/totalTime << " frames/second" << endl;
 #endif
@@ -200,20 +245,112 @@ int main(int argc, char** argv)
 
 shared_ptr<NetworkTable> initializeNetworkTables()
 {
-   // Connect NetworkTables and get access to the tracking table.
-   NetworkTable::SetClientMode();
+    // Connect NetworkTables and get access to the tracking table.
+    NetworkTable::SetClientMode();
     NetworkTable::SetTeam(2083);
     
 #if NON_ROBOT_NETWORK_TABLES
     // Change this address to the dynamically-generated
     // TCP/IP address of the computer (not roboRIO) that
     // is running a NetworkTables intance in server mode.
-    NetworkTable::SetIPAddress("169.254.148.140");
+    NetworkTable::SetIPAddress("169.254.194.175");
 #endif
 
     NetworkTable::Initialize();
 
     return NetworkTable::GetTable("target_tracking_table");
+}
+
+void runContourDetectionPipeline(Mat const& frame,
+                                 vector<vector<Point>>& hits,
+                                 vector<Rect>& hitRects,
+                                 vector<vector<Point>>& skips)
+{
+    TICK_ACCUMULATOR_START(hsl_threshold);
+    Mat hslFrame;
+	double hslThresholdHue[] = {55.0, 115.0};
+	double hslThresholdSaturation[] = {175.0, 255.0};
+	double hslThresholdLuminance[] = {50.0, 255.0};
+    hslThreshold(frame, hslThresholdHue, hslThresholdSaturation, hslThresholdLuminance, hslFrame);
+    TICK_ACCUMULATOR_END(hsl_threshold);
+
+    TICK_ACCUMULATOR_START(dilation);
+    Mat dilationFrame;
+	Mat cvDilateKernel;
+	Point cvDilateAnchor(-1, -1);
+	double cvDilateIterations = 1.0;                // 1.0
+    int cvDilateBordertype = BORDER_CONSTANT;       // BORDER_CONSTANT
+	Scalar cvDilateBordervalue(-1);                 // -1
+	cvDilate(hslFrame, cvDilateKernel, cvDilateAnchor, cvDilateIterations, cvDilateBordertype, cvDilateBordervalue, dilationFrame);
+    TICK_ACCUMULATOR_END(dilation);
+
+    TICK_ACCUMULATOR_START(find_contours);
+    vector<vector<Point>> foundContours;
+	bool findContoursExternalOnly = false;          // false
+	findContours(dilationFrame, findContoursExternalOnly, foundContours);
+    TICK_ACCUMULATOR_END(find_contours);
+
+    TICK_ACCUMULATOR_START(filtered_contours);
+    vector<vector<Point>> filteredContours;
+	double filterContoursMinArea = 150.0; 
+	double filterContoursMinPerimeter = 0;          // 0.0
+	double filterContoursMinWidth = 0.0;            // 0.0
+	double filterContoursMaxWidth = 1000.0;         // 1000.0
+	double filterContoursMinHeight = 0.0;           // 0.0
+	double filterContoursMaxHeight = 1000.;         // 1000.0
+	double filterContoursSolidity[] = {0.0, 100};
+	double filterContoursMaxVertices = 1000000;     // 1000000.0
+	double filterContoursMinVertices = 0;           // 0.0
+	double filterContoursMinRatio = 0.0;            // 0.0
+	double filterContoursMaxRatio = 1000.0;         // 1000.0
+	filterContours(foundContours,
+                   filterContoursMinArea,
+                   filterContoursMinPerimeter,
+                   filterContoursMinWidth,
+                   filterContoursMaxWidth,
+                   filterContoursMinHeight,
+                   filterContoursMaxHeight,
+                   filterContoursSolidity,
+                   filterContoursMaxVertices,
+                   filterContoursMinVertices,
+                   filterContoursMinRatio,
+                   filterContoursMaxRatio,
+                   filteredContours);
+    TICK_ACCUMULATOR_END(filtered_contours);
+
+    TICK_ACCUMULATOR_START(filter);
+    filterContours(filteredContours, hits, hitRects, skips);
+    TICK_ACCUMULATOR_END(filter);
+}
+
+void runBlobDetectionPipeline(SimpleBlobDetector const& detector,
+                              Mat const& frame,
+                              vector<KeyPoint>& hits,
+                              vector<KeyPoint>& skips)
+{
+//    TICK_ACCUMULATOR_START(blur);
+//    Mat blurredFrame;
+//    medianBlur(frame, blurredFrame, 11);
+//    TICK_ACCUMULATOR_END(blur);
+    
+//    TICK_ACCUMULATOR_START(threshold);
+//    Mat thresholdFrame;
+//    threshold(frame, thresholdFrame, 200, 255, CV_THRESH_BINARY);
+//    TICK_ACCUMULATOR_END(threshold);
+
+    TICK_ACCUMULATOR_START(detect);
+    vector<KeyPoint> keyPoints;
+    detector.detect(frame, keyPoints); 
+    TICK_ACCUMULATOR_END(detect);
+
+    TICK_ACCUMULATOR_START(sort);
+    sort(keyPoints.begin(), keyPoints.end(),
+         [] (KeyPoint const& a, KeyPoint const& b) { return a.size > b.size; });
+    TICK_ACCUMULATOR_END(sort);
+
+    TICK_ACCUMULATOR_START(filter);
+    filterKeyPoints(keyPoints, hits, skips);
+    TICK_ACCUMULATOR_END(filter);
 }
 
 /**
@@ -224,7 +361,9 @@ shared_ptr<NetworkTable> initializeNetworkTables()
  * are not viable target candidates) will be returned in the
  * "skips" vector.
  */
-void filterKeyPoints(vector<KeyPoint> const keyPoints, vector<KeyPoint>& hits, vector<KeyPoint>& skips)
+void filterKeyPoints(vector<KeyPoint> const& keyPoints,
+                     vector<KeyPoint>& hits,
+                     vector<KeyPoint>& skips)
 {
     if (keyPoints.size() == 0)
     {
@@ -259,7 +398,90 @@ void filterKeyPoints(vector<KeyPoint> const keyPoints, vector<KeyPoint>& hits, v
     }
 }
 
-SimpleBlobDetector::Params getParamsForGRIPFindBlobs()
+/**
+ * Filter the contours...
+ */
+void filterContours(vector<vector<Point>> const& contours,
+                    vector<vector<Point>>& hits,
+                    vector<Rect>& hitRects,
+                    vector<vector<Point>>& skips)
+{
+    if (contours.size() == 0)
+    {
+        return;
+    }
+
+    if (contours.size() == 1)
+    {
+        skips.push_back(*(contours.begin()));
+        return;
+    }
+
+    for (auto iter = contours.begin(); iter != contours.end()-1; iter++)
+    {
+        Rect rect = boundingRect(*iter);
+        if (rect.height < 1 * rect.width || rect.height > 4 * rect.width)
+        {
+//            cout << "Skipping contour (aspect ratio)..." << endl;
+            continue;
+        }
+
+        if (rect.area() > 6000)
+        {
+//            cout << "Skipping contour (area)..." << rect.area() << endl;
+            continue;
+        }
+
+        for (auto other = iter+1; other != contours.end(); other++)
+        {
+            Rect rectOther = boundingRect(Mat(*other));
+            if (rectOther.height < 1 * rectOther.width || rectOther.height > 4 * rectOther.width)
+            {
+//                cout << "Skipping contour (aspect ratio)..." << endl;
+                continue;
+            }
+
+            if (rectOther.area() > 6000)
+            {
+//                cout << "Skipping contour (area)..." << rect.area() << endl;
+                continue;
+            }
+
+            auto avgTargetWidth = (rect.width + rectOther.width)/2;
+            auto avgTargetHeight = (rect.height + rectOther.height)/2;
+//            cout << "Averages: " << avgTargetWidth << " " << avgTargetHeight << endl;
+
+            auto rectX = rect.x + rect.width/2;
+            auto rectOtherX = rectOther.x + rectOther.width/2;
+//            cout << "x: " << rectX << " " << rectOtherX << endl;
+
+            auto rectY = rect.y + rect.height/2;
+            auto rectOtherY = rectOther.y + rectOther.height/2;
+//            cout << "y: " << rectY << " " << rectOtherY << endl;
+
+            auto deltaX = abs(rectX - rectOtherX);
+            auto deltaY =  abs(rectY - rectOtherY);
+//            cout << "Deltas: " << deltaX << " " << deltaY << endl;
+
+            if ((deltaX < 7 * avgTargetWidth) && (deltaX > 2 * avgTargetWidth) &&
+                (deltaY < 1.0 * avgTargetHeight))
+            {
+                hits.push_back(*iter);
+                hits.push_back(*other);
+                hitRects.push_back(rect);
+                hitRects.push_back(rectOther);
+                return;
+            }
+            else
+            {
+//                cout << "Skipping contour (filters)..." << endl;
+                skips.push_back(*iter);
+            }
+        }   
+    }
+}
+
+SimpleBlobDetector::Params getSimpleBlobDetectorParams()
 {
     const float fsfs = FRAME_SCALE_FACTOR * FRAME_SCALE_FACTOR;
 
@@ -287,44 +509,94 @@ SimpleBlobDetector::Params getParamsForGRIPFindBlobs()
     return params;
 }
 
-SimpleBlobDetector::Params getParamsForNormalVideo()
+/**
+ * Segment an image based on hue, saturation, and luminance ranges.
+ *
+ * @param input The image on which to perform the HSL threshold.
+ * @param hue The min and max hue.
+ * @param sat The min and max saturation.
+ * @param lum The min and max luminance.
+ * @param output The image in which to store the output.
+ */
+void hslThreshold(Mat const& input, double hue[], double sat[], double lum[], Mat& out)
 {
-    SimpleBlobDetector::Params params = SimpleBlobDetector::Params();
-    params.thresholdStep = 2;
-    params.minThreshold = 180;
-    params.maxThreshold = 255;
-    params.minRepeatability = 1;
-    params.minDistBetweenBlobs = 20;
-    params.filterByColor = false;
-    params.blobColor = 100;
-    params.filterByArea = true;
-    params.minArea = 400;
-    params.filterByCircularity = false;
-    params.filterByInertia = false;
-    params.filterByConvexity = true;
-    params.minConvexity = 0.9;
-    params.maxConvexity = 1.0;
-
-    return params;
+	cvtColor(input, out,     COLOR_BGR2HLS);
+	inRange(out,     Scalar(hue[0], lum[0], sat[0]),     Scalar(hue[1], lum[1], sat[1]), out);
 }
 
-SimpleBlobDetector::Params getParamsForThresholdVideo()
+/**
+ * Expands area of higher value in an image.
+ * @param src the Image to dilate.
+ * @param kernel the kernel for dilation.
+ * @param anchor the center of the kernel.
+ * @param iterations the number of times to perform the dilation.
+ * @param borderType pixel extrapolation method.
+ * @param borderValue value to be used for a constant border.
+ * @param dst Output Image.
+ */
+void cvDilate(Mat const& src, Mat &kernel, Point &anchor, double iterations, int borderType, Scalar &borderValue, Mat& dst)
 {
-    SimpleBlobDetector::Params params = SimpleBlobDetector::Params();
-    params.thresholdStep = 127;
-    params.minThreshold = 0;
-    params.maxThreshold = 255;
-    params.minRepeatability = 1;
-    params.minDistBetweenBlobs = 20;
-    params.filterByColor = false;
-    params.blobColor = 100;
-    params.filterByArea = true;
-    params.minArea = 400;
-    params.filterByCircularity = false;
-    params.filterByInertia = false;
-    params.filterByConvexity = true;
-    params.minConvexity = 0.9;
-    params.maxConvexity = 1.0;
-
-    return params;
+	    dilate(src, dst, kernel, anchor, (int)iterations, borderType, borderValue);
 }
+
+/**
+ * Finds contours in an image.
+ *
+ * @param input The image to find contours in.
+ * @param externalOnly if only external contours are to be found.
+ * @param contours vector of contours to put contours in.
+ */
+void findContours(Mat const& input, bool externalOnly, vector<vector<Point>>& contours)
+{
+	vector<Vec4i> hierarchy;
+	contours.clear();
+	int mode = externalOnly ? RETR_EXTERNAL : RETR_LIST;
+	int method = CHAIN_APPROX_SIMPLE;
+	findContours(input, contours, hierarchy, mode, method);
+}
+
+/**
+ * Filters through contours.
+ * @param inputContours is the input vector of contours.
+ * @param minArea is the minimum area of a contour that will be kept.
+ * @param minPerimeter is the minimum perimeter of a contour that will be kept.
+ * @param minWidth minimum width of a contour.
+ * @param maxWidth maximum width.
+ * @param minHeight minimum height.
+ * @param maxHeight  maximimum height.
+ * @param solidity the minimum and maximum solidity of a contour.
+ * @param minVertexCount minimum vertex Count of the contours.
+ * @param maxVertexCount maximum vertex Count.
+ * @param minRatio minimum ratio of width to height.
+ * @param maxRatio maximum ratio of width to height.
+ * @param output vector of filtered contours.
+ */
+void filterContours(vector<vector<Point>> const& inputContours,
+                    double minArea,
+                    double minPerimeter,
+                    double minWidth, double maxWidth,
+                    double minHeight, double maxHeight,
+                    double solidity[],
+                    double maxVertexCount, double minVertexCount,
+                    double minRatio, double maxRatio,
+                    vector<vector<Point>> &output)
+{
+    vector<Point> hull;
+    output.clear();
+    for (vector<Point> contour: inputContours) {
+    	Rect bb = boundingRect(contour);
+    	if (bb.width < minWidth || bb.width > maxWidth) continue;
+    	if (bb.height < minHeight || bb.height > maxHeight) continue;
+    	double area = contourArea(contour);
+    	if (area < minArea) continue;
+    	if (arcLength(contour, true) < minPerimeter) continue;
+    	convexHull(Mat(contour, true), hull);
+    	double solid = 100 * area / contourArea(hull);
+    	if (solid < solidity[0] || solid > solidity[1]) continue;
+    	if (contour.size() < minVertexCount || contour.size() > maxVertexCount)	continue;
+    	double ratio = (double) bb.width / (double) bb.height;
+    	if (ratio < minRatio || ratio > maxRatio) continue;
+    	output.push_back(contour);
+    }
+}
+
