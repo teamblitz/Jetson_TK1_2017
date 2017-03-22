@@ -26,7 +26,7 @@ using namespace llvm;
 map<string, int64> ticks;
 #if MEASURE_PERFORMANCE
 #define TICK_ACCUMULATOR_START(NAME)    auto NAME ## Start = getTickCount()
-#define TICK_ACCUMULATOR_END(NAME)	    ticks[#NAME] += (getTickCount() - NAME ## Start)
+#define TICK_ACCUMULATOR_END(NAME)      ticks[#NAME] += (getTickCount() - NAME ## Start)
 #else
 #define TICK_ACCUMULATOR_START(NAME)
 #define TICK_ACCUMULATOR_END(NAME)
@@ -142,6 +142,10 @@ int main(int argc, char** argv)
     Mat frame;
     Mat detectionFrame;
 
+    // Analytics.
+    double minArea = 1000000;
+    double maxArea = 0;
+
     // Grab and process frames.
     for (;;)
     {
@@ -192,12 +196,21 @@ int main(int argc, char** argv)
             displayRect.y = top;
             displayRect.width = abs(right - left);
             displayRect.height = abs(bottom - top);
+            double area = displayRect.width * displayRect.height;
+            if (area < minArea)
+            {
+                minArea = area;
+            }
+            if (area > maxArea)
+            {
+                maxArea = area;
+            }
 
             // Send target info to network tables.
             center[0] = centerX;
             center[1] = centerY;
-            rect[0] = left;                    // top, left, bottom, right
-            rect[1] = top;
+            rect[0] = top;                    // top, left, bottom, right
+            rect[1] = left;
             rect[2] = bottom;
             rect[3] = right;
 
@@ -206,6 +219,7 @@ int main(int argc, char** argv)
             ttTable->PutBoolean("tracking", true);
             ttTable->PutNumberArray("center", centerArray);
             ttTable->PutNumberArray("rect", rectArray);
+            ttTable->PutNumber("area", area);
         }
         else
         {
@@ -214,6 +228,7 @@ int main(int argc, char** argv)
             ttTable->PutBoolean("tracking", false);
             ttTable->PutNumberArray("center", centerArray);
             ttTable->PutNumberArray("rect", rectArray);
+            ttTable->PutNumberArray("area", 0);
         }
         TICK_ACCUMULATOR_END(network_tables);
 
@@ -251,6 +266,8 @@ int main(int argc, char** argv)
     cout << "  other: " << other/tickFreq << " seconds" << endl;
     cout << "Frames processed: " << frameCount << endl;
     cout << "Frame rate: " << frameCount/totalTime << " frames/second" << endl;
+    cout << "Min Area: " << minArea << endl;
+    cout << "Max Area: " << maxArea << endl;
 #endif
 
     // Clean up and shutdown.
