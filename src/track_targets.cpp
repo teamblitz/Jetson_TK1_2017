@@ -18,7 +18,7 @@ using namespace llvm;
 #define USE_CAMERA_INPUT            0   // 1
 #define RESTREAM_VIDEO              0   // 1
 #define USE_CONTOUR_DETECTION       1   // 1   vs. 0 ==  simple blob detection
-#define VIEW_OUTPUT                 1   // 0
+#define VIEW_OUTPUT_ON_DISPLAY      1   // 0
 #define NON_ROBOT_NETWORK_TABLES    1   // 0
 #define MEASURE_PERFORMANCE         1   // 0
 
@@ -44,21 +44,35 @@ void runContourDetectionPipeline(Mat const& frame,
                                  vector<vector<Point>>& skips);
 void runBlobDetectionPipeline(SimpleBlobDetector const& detector,
                               Mat const& frame,
-                              vector<KeyPoint>& hits,
-                              vector<KeyPoint>& skips);
+                              vector<vector<Point>>& hits,
+                              vector<Rect>& hitRects,
+                              vector<vector<Point>>& skips);
 
 void filterKeyPoints(vector<KeyPoint> const& keypoints,
-                     vector<KeyPoint>& hits,
-                     vector<KeyPoint>& skips);
+                     vector<vector<Point>>& hits,
+                     vector<Rect>& hitRects,
+                     vector<vector<Point>>& skips);
 void filterContours(vector<vector<Point>> const& contours,
                     vector<vector<Point>>& hits,
                     vector<Rect>& hitRects,
                     vector<vector<Point>>& skips);
 
 SimpleBlobDetector::Params getSimpleBlobDetectorParams();
-void hslThreshold(Mat const& input, double hue[], double sat[], double lum[], Mat& out);
-void cvDilate(Mat const& src, Mat &kernel, Point &anchor, double iterations, int borderType, Scalar &borderValue, Mat& dst);
-void findContours(Mat const& input, bool externalOnly, vector<vector<Point>>& contours);
+void hslThreshold(Mat const& input,
+                  double hue[],
+                  double sat[],
+                  double lum[],
+                  Mat& out);
+void cvDilate(Mat const& src,
+              Mat &kernel,
+              Point &anchor,
+              double iterations,
+              int borderType,
+              Scalar &borderValue,
+              Mat& dst);
+void findContours(Mat const& input,
+                  bool externalOnly,
+                  vector<vector<Point>>& contours);
 void filterContours(vector<vector<Point>> const& inputContours,
                     double minArea,
                     double minPerimeter,
@@ -68,6 +82,9 @@ void filterContours(vector<vector<Point>> const& inputContours,
                     double maxVertexCount, double minVertexCount,
                     double minRatio, double maxRatio,
                     vector<vector<Point>>& output);
+void keyPointToPointsAndRect(KeyPoint const& keyPoint,
+                             vector<Point>& points,
+                             Rect& rect);
 
 int main(int argc, char** argv)
 {
@@ -140,10 +157,14 @@ int main(int argc, char** argv)
         resize(rawFrame, frame, Size(), FRAME_SCALE_FACTOR, FRAME_SCALE_FACTOR, CV_INTER_AREA);
         TICK_ACCUMULATOR_END(resize);
 
-#if USE_CONTOUR_DETECTION
         vector<vector<Point>> hits, skips;
         vector<Rect> hitRects;
+
+#if USE_CONTOUR_DETECTION
         runContourDetectionPipeline(frame, hits, hitRects, skips);
+#else
+        runBlobDetectionPipeline(blobDetector, frame, hits, hitRects, skips);
+#endif
 
         TICK_ACCUMULATOR_START(network_tables);
         Point displayCenter;
@@ -170,7 +191,7 @@ int main(int argc, char** argv)
             displayRect.x = left;
             displayRect.y = top;
             displayRect.width = abs(right - left);
-            displayRect.height = abs(bottom - top);       
+            displayRect.height = abs(bottom - top);
 
             // Send target info to network tables.
             center[0] = centerX;
@@ -179,60 +200,36 @@ int main(int argc, char** argv)
             rect[1] = top;
             rect[2] = bottom;
             rect[3] = right;
-            
+
             ArrayRef<double> centerArray(center);
             ArrayRef<double> rectArray(rect);
-            ttTable->PutNumberArray("centers", centerArray);
-            ttTable->PutNumberArray("rects", rectArray);
+            ttTable->PutBoolean("tracking", true);
+            ttTable->PutNumberArray("center", centerArray);
+            ttTable->PutNumberArray("rect", rectArray);
         }
-        TICK_ACCUMULATOR_END(network_tables);  
-#else
-        vector<KeyPoint> hits, skips;
-        runBlobDetectionPipeline(blobDetector, frame, hits, skips);
-
-        TICK_ACCUMULATOR_START(network_tables);
-        // Send target info to network tables.
-        vector<double> targets(6, 0.0); 
-        if (hits.size() > 1)
+        else
         {
-            targets[0] = hits[0].pt.x;
-            targets[1] = hits[0].pt.y;
-            targets[2] = hits[0].size/2;
-            targets[3] = hits[1].pt.x;
-            targets[4] = hits[1].pt.y;
-            targets[5] = hits[1].size/2;
+            ArrayRef<double> centerArray {0, 0, 0, 0};
+            ArrayRef<double> rectArray {0, 0, 0, 0};
+            ttTable->PutBoolean("tracking", false);
+            ttTable->PutNumberArray("center", centerArray);
+            ttTable->PutNumberArray("rect", rectArray);
         }
-        ArrayRef<double> array(targets);
-        ttTable->PutNumberArray("blob_keypoints", array);
-        TICK_ACCUMULATOR_END(network_tables);  
-#endif
+        TICK_ACCUMULATOR_END(network_tables);
 
         // Render the keypoints onto the frames.
         TICK_ACCUMULATOR_START(view);
         frame.copyTo(detectionFrame);
-
-#if USE_CONTOUR_DETECTION
-        rectangle(detectionFrame, displayRect, Scalar(255, 255, 0), 1);
-        circle(detectionFrame, displayCenter, 2, Scalar(255, 255, 255), 1);
-        drawContours(detectionFrame, hits, -1, Scalar(0, 0, 255), 3);
-        drawContours(detectionFrame, skips, -1, Scalar(0, 0, 0), 3);
-#else
-        for (size_t i = 0; i < hits.size(); i++)
-        {
-            circle(detectionFrame, hits[i].pt, hits[i].size/2, Scalar(0, 0, 255), 3);
-        }
-
-        for (size_t i = 0; i < skips.size(); i++)
-        {
-            circle(detectionFrame, skips[i].pt, skips[i].size/2, Scalar(0, 0, 0), 3);
-        }
-#endif
+        rectangle(detectionFrame, displayRect, Scalar(0, 255, 0), 2);
+        circle(detectionFrame, displayCenter, 4, Scalar(0, 255, 0), 2);
+        drawContours(detectionFrame, hits, -1, Scalar(0, 0, 255), 2);
+        drawContours(detectionFrame, skips, -1, Scalar(0, 0, 0), 2);
 
 #if RESTREAM_VIDEO
         restreamSource.PutFrame(detectionFrame);
 #endif
 
-#if VIEW_OUTPUT
+#if VIEW_OUTPUT_ON_DISPLAY
         imshow("frame", detectionFrame);
         waitKey(1);
 #endif
@@ -271,12 +268,12 @@ shared_ptr<NetworkTable> initializeNetworkTables()
     // Change this address to the dynamically-generated
     // TCP/IP address of the computer (not roboRIO) that
     // is running a NetworkTables intance in server mode.
-    NetworkTable::SetIPAddress("169.254.194.175");
+    NetworkTable::SetIPAddress("169.254.25.155");
 #endif
 
     NetworkTable::Initialize();
 
-    return NetworkTable::GetTable("target_tracking_table");
+    return NetworkTable::GetTable("target_tracking");
 }
 
 void runContourDetectionPipeline(Mat const& frame,
@@ -299,7 +296,9 @@ void runContourDetectionPipeline(Mat const& frame,
 	double cvDilateIterations = 1.0;                // 1.0
     int cvDilateBordertype = BORDER_CONSTANT;       // BORDER_CONSTANT
 	Scalar cvDilateBordervalue(-1);                 // -1
-	cvDilate(hslFrame, cvDilateKernel, cvDilateAnchor, cvDilateIterations, cvDilateBordertype, cvDilateBordervalue, dilationFrame);
+	cvDilate(hslFrame, cvDilateKernel, cvDilateAnchor,
+             cvDilateIterations, cvDilateBordertype,
+             cvDilateBordervalue, dilationFrame);
     TICK_ACCUMULATOR_END(dilation);
 
     TICK_ACCUMULATOR_START(find_contours);
@@ -343,8 +342,9 @@ void runContourDetectionPipeline(Mat const& frame,
 
 void runBlobDetectionPipeline(SimpleBlobDetector const& detector,
                               Mat const& frame,
-                              vector<KeyPoint>& hits,
-                              vector<KeyPoint>& skips)
+                              vector<vector<Point>>& hits,
+                              vector<Rect>& hitRects,
+                              vector<vector<Point>>& skips)
 {
 //    TICK_ACCUMULATOR_START(blur);
 //    Mat blurredFrame;
@@ -367,7 +367,7 @@ void runBlobDetectionPipeline(SimpleBlobDetector const& detector,
     TICK_ACCUMULATOR_END(sort);
 
     TICK_ACCUMULATOR_START(filter);
-    filterKeyPoints(keyPoints, hits, skips);
+    filterKeyPoints(keyPoints, hits, hitRects, skips);
     TICK_ACCUMULATOR_END(filter);
 }
 
@@ -380,8 +380,9 @@ void runBlobDetectionPipeline(SimpleBlobDetector const& detector,
  * "skips" vector.
  */
 void filterKeyPoints(vector<KeyPoint> const& keyPoints,
-                     vector<KeyPoint>& hits,
-                     vector<KeyPoint>& skips)
+                     vector<vector<Point>>& hits,
+                     vector<Rect>& hitRects,
+                     vector<vector<Point>>& skips)
 {
     if (keyPoints.size() == 0)
     {
@@ -390,7 +391,12 @@ void filterKeyPoints(vector<KeyPoint> const& keyPoints,
 
     if (keyPoints.size() == 1)
     {
-        skips.push_back(*(keyPoints.begin()));
+        vector<Point> points;
+        Rect rect;
+
+        keyPointToPointsAndRect(*(keyPoints.begin()), points, rect);
+
+        skips.push_back(points);
         return;
     }
 
@@ -404,13 +410,29 @@ void filterKeyPoints(vector<KeyPoint> const& keyPoints,
             if ((deltaX < 9 * avgTargetSize) && (deltaX > 2 * avgTargetSize) &&
                 (deltaY < 3 * avgTargetSize))
             {
-                hits.push_back(*iter);
-                hits.push_back(*other);
+                vector<Point> iterPoints;
+                Rect iterRect;
+
+                keyPointToPointsAndRect(*iter, iterPoints, iterRect);
+                hits.push_back(iterPoints);
+                hitRects.push_back(iterRect);
+
+                vector<Point> otherPoints;
+                Rect otherRect;
+
+                keyPointToPointsAndRect(*other, otherPoints, otherRect);
+                hits.push_back(otherPoints);
+                hitRects.push_back(otherRect);
+
                 return;
             }
             else
             {
-                skips.push_back(*iter);
+                vector<Point> points;
+                Rect rect;
+
+                keyPointToPointsAndRect(*iter, points, rect);
+                skips.push_back(points);
             }
         }   
     }
@@ -536,10 +558,14 @@ SimpleBlobDetector::Params getSimpleBlobDetectorParams()
  * @param lum The min and max luminance.
  * @param output The image in which to store the output.
  */
-void hslThreshold(Mat const& input, double hue[], double sat[], double lum[], Mat& out)
+void hslThreshold(Mat const& input,
+                  double hue[],
+                  double sat[],
+                  double lum[],
+                  Mat& out)
 {
-	cvtColor(input, out,     COLOR_BGR2HLS);
-	inRange(out,     Scalar(hue[0], lum[0], sat[0]),     Scalar(hue[1], lum[1], sat[1]), out);
+	cvtColor(input, out, COLOR_BGR2HLS);
+	inRange(out, Scalar(hue[0], lum[0], sat[0]), Scalar(hue[1], lum[1], sat[1]), out);
 }
 
 /**
@@ -552,9 +578,15 @@ void hslThreshold(Mat const& input, double hue[], double sat[], double lum[], Ma
  * @param borderValue value to be used for a constant border.
  * @param dst Output Image.
  */
-void cvDilate(Mat const& src, Mat &kernel, Point &anchor, double iterations, int borderType, Scalar &borderValue, Mat& dst)
+void cvDilate(Mat const& src,
+              Mat &kernel,
+              Point &anchor,
+              double iterations,
+              int borderType,
+              Scalar &borderValue,
+              Mat& dst)
 {
-	    dilate(src, dst, kernel, anchor, (int)iterations, borderType, borderValue);
+    dilate(src, dst, kernel, anchor, (int)iterations, borderType, borderValue);
 }
 
 /**
@@ -601,7 +633,8 @@ void filterContours(vector<vector<Point>> const& inputContours,
 {
     vector<Point> hull;
     output.clear();
-    for (vector<Point> contour: inputContours) {
+    for (vector<Point> contour: inputContours)
+    {
     	Rect bb = boundingRect(contour);
     	if (bb.width < minWidth || bb.width > maxWidth) continue;
     	if (bb.height < minHeight || bb.height > maxHeight) continue;
@@ -618,3 +651,22 @@ void filterContours(vector<vector<Point>> const& inputContours,
     }
 }
 
+void keyPointToPointsAndRect(KeyPoint const& keyPoint,
+                             vector<Point>& points,
+                             Rect& rect)
+{
+    // Convert keypoints to vector of points in the shape of a rectangle.
+    float left = keyPoint.pt.x - keyPoint.size/2;
+    float top = keyPoint.pt.y - keyPoint.size/2;
+    float right = left + keyPoint.size;
+    float bottom = top + keyPoint.size;
+    points.push_back(Point(left, top));
+    points.push_back(Point(right, top));
+    points.push_back(Point(right, bottom));
+    points.push_back(Point(left, bottom));
+    points.push_back(Point(left, top));
+    rect.x = left;
+    rect.y = top;
+    rect.width = keyPoint.size;
+    rect.height = keyPoint.size;
+}
