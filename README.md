@@ -1,6 +1,6 @@
 # Instructions
 
-Initial setup requires the creaion of a build directory, running cmake, and make as follows:
+Initial setup requires the creation of a build directory, running cmake, and make as follows:
 
 ```
 $ mkdir build
